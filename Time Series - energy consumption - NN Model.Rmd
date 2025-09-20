@@ -1,0 +1,366 @@
+---
+title: "Forecast using a Neural Network model"
+author: "Lorena Romeo"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Purpose:
+This is the bonus part, in which I will forecast the power consumption using a 
+Neural Network model, taking into account also the Temperature regressor.
+
+The first steps are the same of the main project presentation.
+
+## Load necessary libraries:
+
+```{r, warning = FALSE, message = FALSE}
+library(readxl)
+library(openxlsx)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(zoo)
+library(writexl)
+```
+
+
+## Load file
+
+```{r}
+#load xlsx file
+data_row = read.xlsx("C:/Users/Utilisateur/OneDrive/Desktop/2023-11-Elec-train.xlsx")
+#plot(data_row)
+head(data_row) #the first record on timestamp column is not in the good format, I need to convert it in the good one 
+#str(data_row)
+```
+
+## Work on date conversion
+
+```{r}
+convert_timestamp = function(ts) {
+  if (grepl("^[0-9]+\\.[0-9]+$", ts)) {
+    # Handle Excel serial date format
+    excel_date = as.numeric(ts)
+    origin = as.Date("1899-12-30")
+    date = origin + excel_date
+    return(as.POSIXct(date))
+  } else {
+    # Handle standard datetime format
+    return(parse_date_time(ts, orders = "m/d/y H:M", tz = "UTC"))
+  }
+}
+
+# Apply conversion function to Timestamp column
+data_row$Timestamp = sapply(data_row$Timestamp, convert_timestamp)
+
+#the timestamp is numeric now, I need to convert to datetime
+# Convert numeric Unix epoch timestamps to POSIXct
+data_row$Timestamp = as.POSIXct(data_row$Timestamp, origin = "1970-01-01", tz = "UTC")
+
+#head(data_row)
+```
+
+
+## Rename the variables for easiness
+
+```{r}
+#now that the dataset is clean I will rename the variables in a easier way
+# Rename columns to valid names
+elec = data_row %>%
+  rename(
+    Power_kW = `Power.(kW)`,
+    Temp_C = `Temp.(C°)` # Use the exact name here
+  )
+
+#verify results
+# str(elec)
+# head(elec)
+```
+
+
+```{r}
+elec <- elec %>%
+  filter(!is.na(Power_kW))
+
+#interpolation
+elec <- elec %>%
+  mutate(
+    Power_kW = na.approx(ifelse(Power_kW == 0, NA, Power_kW))
+  )
+```
+
+
+
+## Create train and test dataset
+
+```{r}
+# Set up the start and end dates fro train and test dataset
+train_start = as.POSIXct("2010-01-01 01:15:00", tz = "UTC")
+train_end = as.POSIXct("2010-02-18 23:45:00", tz = "UTC")
+test_start = as.POSIXct("2010-02-19 00:00:00",  tz = "UTC")
+test_end = as.POSIXct("2010-02-20 23:45:00",  tz = "UTC")
+
+# Create training and test datasets
+set.seed(123)
+train_data = elec %>% filter(Timestamp >= train_start & Timestamp <= train_end)
+test_data = elec %>% filter(Timestamp >= test_start & Timestamp <= test_end)
+
+
+# str(train_data)
+# str(test_data)
+
+#check the boundaries of the datasets
+# min(train_data$Timestamp)
+# max(train_data$Timestamp)  
+# min(test_data$Timestamp) 
+# max(test_data$Timestamp)
+```
+
+## Create Time Series objects
+
+```{r}
+# Create time series objects (without temperature)
+# Create time series objects
+frequency = 96  # 96 intervals per day (15-minute intervals)
+power_train = ts(train_data$Power_kW, start = c(1, 6), end = c(49, 96), frequency = frequency)
+#I do not put the end in the test part because the boundary is already set in the code above
+power_test = ts(test_data$Power_kW, start = c(50, 1),  frequency = frequency)
+
+# #verify results
+# str(power_train)
+# str(power_test)
+```
+
+
+
+# Create a first Neural Network Model using NNAR
+
+This is a first attempt on creating a Neural Network model without fine tuning.
+
+```{r}
+#create neural model
+fit_nnar = nnetar(power_train, xreg = train_data$Temp_C)
+
+#check predictions using test data
+prev_nnar = forecast(fit_nnar, xreg = test_data$Temp_C, h = length(power_test))
+```
+
+
+## Check quality of the model
+
+```{r}
+# # Mean Absolute Error
+# mae = mean(abs(prev_nnar$mean - power_test))
+# print(mae)
+# 
+# # Mean Squared Error
+# mse = mean((prev_nnar$mean - power_test)^2)
+# print(mse)
+
+# Root Mean Squared Error
+nnr1_rmse = sqrt(mean((prev_nnar$mean - power_test)^2))
+print(nnr1_rmse)
+
+# # Mean Absolute Percentage Error
+# mape = mean(abs((prev_nnar$mean - power_test) / power_test)) * 100
+# print(mape)
+# 
+# # Symmetric Mean Absolute Percentage Error
+# smape = mean(2 * abs(prev_nnar$mean - power_test) / (abs(prev_nnar$mean) + abs(power_test))) * 100
+# print(smape)
+
+```
+From the RMSE I can suppose that with a bit of fine tune the model can have a better fit.
+
+
+# Retrieve the parameters of the auto generated model to understand how to fine tune it
+
+I extract the parameters of the auto generated nnar and then decide what to change
+```{r}
+# View specific model components
+p_value = fit_nnar$p  # Number of non-seasonal lags
+P_value = fit_nnar$P  # Number of seasonal lags
+size_value = fit_nnar$size  # Number of neurons in the hidden layer
+lambda_value = fit_nnar$lambda  # Box-Cox transformation parameter (if used)
+repeats_value = fit_nnar$repeats  # Number of networks averaged
+
+
+# Print these values
+cat("Number of lags (p):", p_value, "\n")
+cat("Number of seasonal lags (P):", P_value, "\n")
+cat("Number of neurons (size):", size_value, "\n")
+cat("Box-Cox transformation (lambda):", lambda_value, "\n")
+cat("Number of repeats:", repeats_value, "\n")
+```
+
+#Fit manually a new model and forecast
+
+I can now try to fine tune the NN model.
+
+```{r}
+#1st attempt
+fit2_nnar = nnetar(
+  power_train,
+  p = 15,
+  P = 1,
+  size = 15,
+  repeats = 10,
+  lambda = "auto",
+  xreg = train_data$Temp_C
+)
+```
+
+
+# Make forecast based on test set and check quality of the model.
+
+```{r}
+# Make forecasts
+prev_nnar2 = forecast(fit2_nnar, xreg = test_data$Temp_C, h = length(power_test))
+
+
+# Evaluate model performance on adjusted test data
+mse = mean((prev_nnar2$mean - power_test)^2)
+print(mse)
+
+# Root Mean Squared Error
+nnr2_rmse = sqrt(mean((prev_nnar2$mean - power_test)^2))
+print(nnr2_rmse)
+```
+
+
+# Fit manually another model and forecast
+```{r}
+#2nd attempt
+fit3_nnar = nnetar(
+  power_train,
+  p = 15,
+  P = 3, 
+  size = 15, 
+  repeats = 10,
+  lambda = "auto",
+  xreg = train_data$Temp_C
+)
+```
+
+
+# Make forecast based on test set and check quality of the model.
+```{r}
+# Make forecasts
+prev_nnar3 = forecast(fit3_nnar, xreg = test_data$Temp_C, h = length(power_test))
+
+# Evaluate model performance on adjusted test data
+mse = mean((prev_nnar3$mean - power_test)^2)
+print(mse)
+
+# Root Mean Squared Error
+nnr3_rmse = sqrt(mean((prev_nnar3$mean - power_test)^2))
+print(nnr3_rmse)
+```
+
+From the RMSE of the three NN models I can see that the 2nd attempt (nnr2) is the
+best one. 
+I will use it to forecast the power consumption on the 21st February.
+
+
+# Plot the best NN model with the test data
+
+```{r}
+#to see in details, plot only forecast
+plot(prev_nnar2$mean, type = "l", col = "blue", lwd = 2, 
+     xlab= "Time", ylab = "Power (kW)", main = "Forecats Vs Actuals")
+#and add the actual (test values)
+lines(power_test, col = "red", lwd = 1, lty = 2)
+#add the legend
+legend("topleft", legend = c("Forecast","Actual"),
+       col = c("blue", "red"), lty = c(1,2), lwd = c(1,2))
+```
+
+
+# Prepare to Forecast the Power kw of the 21st February
+
+```{r}
+# I need to create a new ts object with the complete dataset 
+
+#set up the start and end dates for the complete dataset until 20th feb
+start = as.POSIXct("2010-01-01 01:15:00", tz = "UTC")
+end = as.POSIXct("2010-02-20 23:45:00",  tz = "UTC")
+
+#create complete datasets until 20 feb 2010
+complete_data = elec %>% filter(Timestamp >= start & Timestamp <= end)
+
+#create time series objects (without temperature)
+frequency = 96  # 96 intervals per day (15-minute intervals)
+power_complete = ts(complete_data$Power_kW, start = c(1, 6), frequency = frequency)
+
+#then I create a ts for the complete temperature 
+temp_next = ts(complete_data$Temp_C, start = c(1, 6), frequency = frequency)
+
+#extract the relevant temperature series for the next 96 time points
+temp_forecast = tail(complete_data$Temp_C, 96)  # Extract last 96 temperature observations
+
+#I create a ts object for the temperature of the 21 Feb
+temp_forecast_ts = ts(temp_forecast, frequency = 96)
+```
+
+
+# Train the model using the complete dataset
+
+```{r}
+#I train the model using complete power and temperature data (until 20 Feb 2010)
+naar_complete = nnetar(
+  power_complete,
+  p = 15,
+  P = 1, 
+  size = 15, 
+  repeats = 10,
+  lambda = "auto",
+  xreg = complete_data$Temp_C
+)
+
+```
+
+
+# Forecast the next day: 21st February
+
+```{r}
+#forecast the next 96 time points
+nnar_next = forecast(naar_complete, h = 96, xreg = temp_forecast_ts)
+
+```
+
+# Plot the Forecast together wtih the complete dataset
+
+```{r}
+# Plot the complete data and forecast 
+autoplot(power_complete) +
+   autolayer(nnar_next$mean, series = "Forecast of 21st Feb with Neural Network", color = "red") +
+   ggtitle("Forecats in red the Power_kw demanded on 21st February 2010") +
+   ylab("Power (kW)") +
+   xlab("Time") 
+```
+
+# Eventually print the Forecast results
+
+```{r}
+print(nnar_next)
+```
+
+# Export the results in excel
+```{r}
+#correctly convert forecast power to a data frame
+forecast_nnr = as.data.frame(nnar_next)
+#extracting just the forecast points
+point_forecast_nnr = forecast_nnr[["Point Forecast"]]
+#create columns that I will use as 1st column in excel file
+nnr_forecast_withtemp = as.data.frame(point_forecast_nnr)
+
+
+#rename the columns to more descriptive names
+colnames(nnr_forecast_withtemp) = c("NNR_With_Temperature")
+#save the data frames to an Excel file
+write_xlsx(nnr_forecast_withtemp, path = "C:/Users/Utilisateur/OneDrive/Desktop/Romeo_Lorena_NNR_secondsub.xlsx")
+```
+
